@@ -1,4 +1,18 @@
 let socket;
+const userKeys = {}; // { username: sharedSecret }
+
+function modPow(base, exponent, mod) {
+    let result = 1;
+    base = base % mod;
+    while (exponent > 0) {
+        if (exponent % 2 === 1) {
+            result = (result * base) % mod;
+        }
+        base = (base * base) % mod;
+        exponent = Math.floor(exponent / 2);
+    }
+    return result;
+}
 
 function connectToChat() {
     const token = localStorage.getItem('token'); // Получение токена из localStorage
@@ -11,29 +25,94 @@ function connectToChat() {
     socket = io('http://localhost:3030', { query: { token } });
 
     socket.on('connect', () => {
-        console.log('Successfully connected to the chat');
+        console.log('Connected to the server');
+        // Отображаем чат, только если WebSocket-соединение успешно
         document.getElementById('chat').style.display = 'block';
         document.getElementById('login-form').style.display = 'none';
-    });
+    
+        // Получаем параметры p, g и публичный ключ сервера
+        socket.on('dh-params', ({ p, g, serverPublicKey }) => {
+            console.log(`Received DH params from server: p=${p}, g=${g}, serverPublicKey=${serverPublicKey}`);
+    
+            const privateKey = Math.floor(Math.random() * 20) + 1; // Приватный ключ клиента
+            const publicKey = Math.pow(g, privateKey) % p; // Публичный ключ клиента
+            console.log(`Generated client keys: privateKey=${privateKey}, publicKey=${publicKey}`);
+            const sharedSecret = Math.pow(serverPublicKey, privateKey) % p;
 
-    socket.on('connect_error', (err) => {
-        console.error('Connection error:', err.message);
-    });
+            
 
-    socket.on('disconnect', () => {
+            userKeys[socket.username] = sharedSecret; // Сохраняем ключ
+            socket.sharedSecret = sharedSecret;
+            console.log(`Client shared secret: ${socket.sharedSecret}`);
+            console.log(`Shared secret established: ${sharedSecret}`);
+    
+            // Отправка публичного ключа серверу
+            socket.emit('dh-key-exchange', publicKey);
+        });
+         // Получение всех ключей при подключении
+        socket.on('all-keys', (keys) => {
+            Object.assign(userKeys, keys); // Добавляем все существующие ключи
+            console.log('All keys received:', userKeys);
+        });
+
+        socket.on('update-keys', ({ username, sharedSecret }) => {
+            userKeys[username] = sharedSecret;
+        });
+        socket.on('remove-key', (username) => {
+            delete userKeys[username];
+            console.log(`Key removed for user ${username}`);
+        });
+        
+    });
+    
+    document.getElementById('chat').style.display = 'none';
+    document.getElementById('login-form').style.display = 'block';
+    // Обработка входящего сообщения
+    socket.on('message', (data) => {
+        const { username, message } = data;
+    
+        // Если сообщение от системы (например, пользователь подключился или отключился)
+        if (username === 'System') {
+            const formattedMessage = `[System] ${message}`;
+            console.log(`System message: ${formattedMessage}`);
+    
+            const messageContainer = document.getElementById('messages');
+            const messageElement = document.createElement('div');
+            messageElement.textContent = formattedMessage;
+            messageContainer.appendChild(messageElement);
+        } else {
+            // Используем ключ отправителя для расшифровки
+            const senderKey = userKeys[username];
+            if (!senderKey) {
+                console.error(`No shared secret found for user: ${username}`);
+                return;
+            }
+    
+            const decryptedMessage = String.fromCharCode(
+                ...message.map((char) => char ^ senderKey)
+            );
+    
+            const formattedMessage = `${username} says: ${decryptedMessage}`;
+            console.log(`Decrypted message: ${decryptedMessage}`);
+    
+            const messageContainer = document.getElementById('messages');
+            const messageElement = document.createElement('div');
+            messageElement.textContent = formattedMessage;
+            messageContainer.appendChild(messageElement);
+        }
+    });
+    
+    
+    
+    
+    
+    
+}   socket.on('disconnect', () => {
         console.log('WebSocket disconnected');
         document.getElementById('chat').style.display = 'none';
         document.getElementById('login-form').style.display = 'block';
     });
 
-    // Обработка сообщений от сервера
-    socket.on('message', (encryptedMessage) => {
-        const decipher = crypto.createDecipheriv('aes-256-cbc', socket.sharedSecret, Buffer.alloc(16, 0));
-        let decryptedMessage = decipher.update(encryptedMessage, 'hex', 'utf-8');
-        decryptedMessage += decipher.final('utf-8');
-        console.log('Received message:', decryptedMessage);
-    });
-}
 
 function login(event) {
     event.preventDefault();
@@ -100,16 +179,12 @@ function sendMessage() {
     const message = document.getElementById('message-input').value;
     if (!message.trim()) return;
 
-    try {
-        const cipher = crypto.createCipheriv('aes-256-cbc', socket.sharedSecret, Buffer.alloc(16, 0));
-        let encryptedMessage = cipher.update(message, 'utf-8', 'hex');
-        encryptedMessage += cipher.final('hex');
+    const encryptedMessage = Array.from(message).map(
+        (char) => char.charCodeAt(0) ^ socket.sharedSecret
+    );
 
-        socket.emit('message', encryptedMessage);
-        document.getElementById('message-input').value = '';
-    } catch (err) {
-        console.error('Error encrypting message:', err);
-    }
+    socket.emit('message', encryptedMessage);
+    document.getElementById('message-input').value = '';
 }
 
 function checkEnter(event) {

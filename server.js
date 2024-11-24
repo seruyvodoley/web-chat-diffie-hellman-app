@@ -1,10 +1,9 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
-
+const userKeys = {}; // { username: sharedSecret }
 // Загрузка переменных окружения
 dotenv.config();
 
@@ -18,35 +17,35 @@ const io = new Server(server);
 app.use(express.json());
 app.use(express.static('public'));
 
-// Content Security Policy
-app.use((req, res, next) => {
-    res.setHeader("Content-Security-Policy", "default-src 'self'; font-src 'self' https://fonts.gstatic.com;");
-    next();
-});
-
 // Подключение маршрутов авторизации
 app.use('/auth', authRouter);
 
+// Простая функция для возведения в степень с модулем
+function modPow(base, exponent, mod) {
+    let result = 1;
+    base = base % mod;
+    while (exponent > 0) {
+        if (exponent % 2 === 1) {
+            result = (result * base) % mod;
+        }
+        base = (base * base) % mod;
+        exponent = Math.floor(exponent / 2);
+    }
+    return result;
+}
+
+// Middleware для аутентификации WebSocket
 const authenticate = async (socket, next) => {
     try {
         const token = socket.handshake.query.token;
-        console.log('Handshake query:', socket.handshake.query);
-
-        if (!token || token === 'undefined') {
-            console.error('Token is missing or undefined');
+        if (!token) {
             throw new Error('Authentication token is missing');
         }
 
-        console.log('Token received in WebSocket handshake:', token);
-        console.log('JWT_SECRET used for verification:', process.env.JWT_SECRET);
-
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        console.log('Decoded token:', decoded);
-
         socket.username = decoded.username;
         next();
     } catch (err) {
-        console.error('Authentication error:', err.message);
         next(new Error('Authentication failed'));
     }
 };
@@ -55,41 +54,72 @@ const authenticate = async (socket, next) => {
 io.use(authenticate).on('connection', (socket) => {
     console.log(`${socket.username} connected`);
 
-    // Генерация пары ключей Диффи-Хеллмана
-    const dh = crypto.createDiffieHellman(2048);
-    const publicKey = dh.generateKeys();
-    const privateKey = dh.getPrivateKey();
+    // Отправка всех текущих ключей новому пользователю
+    socket.emit('all-keys', userKeys);
 
-    socket.emit('dh-public-key', publicKey.toString('hex'));
+    // Генерация DH параметров
+    const p = 23; // Простое число
+    const g = 5;  // Основа
+    const privateKey = Math.floor(Math.random() * 20) + 1;
+    const publicKey = Math.pow(g, privateKey) % p;
 
-    // Получаем публичный ключ клиента
-    socket.on('dh-key-exchange', (clientPublicKeyHex) => {
-        const clientPublicKey = Buffer.from(clientPublicKeyHex, 'hex');
-        const sharedSecret = dh.computeSecret(clientPublicKey);
+    socket.emit('dh-params', { p, g, serverPublicKey: publicKey });
 
+    // Сохранение информации о новом ключе после DH-обмена
+    socket.on('dh-key-exchange', (clientPublicKey) => {
+        const sharedSecret = Math.pow(clientPublicKey, privateKey) % p;
         socket.sharedSecret = sharedSecret;
-        console.log(`${socket.username} established a secure connection`);
+    
+        userKeys[socket.username] = sharedSecret; // Сохраняем ключ для пользователя
+        console.log(`${socket.username} shared secret established: ${sharedSecret}`);
+    
+        // Отправляем обновленный список ключей текущему пользователю
+        socket.emit('all-keys', userKeys);
+    
+        // Уведомление остальных пользователей
+        socket.broadcast.emit('update-keys', { username: socket.username, sharedSecret });
+    });
+    // Сообщение всем пользователям о подключении нового пользователя
+    socket.broadcast.emit('message', {
+        username: 'System',
+        message: `${socket.username} has joined the chat!`
     });
 
-    // Обработка зашифрованных сообщений
-    socket.on('message', (encryptedMessage) => {
-        const decipher = crypto.createDecipheriv('aes-256-cbc', socket.sharedSecret, Buffer.alloc(16, 0));
-        let decryptedMessage = decipher.update(encryptedMessage, 'hex', 'utf-8');
-        decryptedMessage += decipher.final('utf-8');
-
-        console.log(`Received message from ${socket.username}: ${decryptedMessage}`);
-        
-        const cipher = crypto.createCipheriv('aes-256-cbc', socket.sharedSecret, Buffer.alloc(16, 0));
-        let encryptedResponse = cipher.update('Message received', 'utf-8', 'hex');
-        encryptedResponse += cipher.final('hex');
-
-        socket.emit('message', encryptedResponse);
-    });
-
+    // Удаление ключа при отключении пользователя
     socket.on('disconnect', () => {
         console.log(`${socket.username} disconnected`);
+        delete userKeys[socket.username];
+        socket.broadcast.emit('remove-key', socket.username); // Уведомить остальных
+
+        // Сообщение всем пользователям о выходе пользователя
+        socket.broadcast.emit('message', {
+            username: 'System',
+            message: `${socket.username} has left the chat.`
+        });
     });
+
+
+
+
+    // Обработка сообщений
+    socket.on('message', (encryptedMessage) => {
+        try {
+            console.log(`Server ${socket.username} says: ${encryptedMessage}`);
+            io.emit('message', {
+                username: socket.username, // Имя отправителя
+                message: encryptedMessage, // Зашифрованное сообщение
+            });
+        } catch (err) {
+            console.error('Error processing message:', err);
+        }
+    });
+    
+
+    
 });
+
+    
+
 
 // Запуск сервера
 const PORT = process.env.PORT || 3030;
