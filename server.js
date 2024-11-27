@@ -1,11 +1,18 @@
 const express = require('express');
-const http = require('http');
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
 const bcrypt = require('bcrypt');
 const pool = require('./db');
 const cookieParser = require('cookie-parser'); // Подключаем cookie-parser
+const fs = require('fs');
+const https = require('https');
+
+// Загрузка SSL-сертификатов
+const sslOptions = {
+    key: fs.readFileSync('server.key'),
+    cert: fs.readFileSync('server.cert'),
+};
 
 // Загрузка переменных окружения
 dotenv.config();
@@ -14,8 +21,8 @@ dotenv.config();
 const authRouter = require('./routes/auth');
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server);
+const httpsServer = https.createServer(sslOptions, app);
+const io = new Server(httpsServer);
 
 const userKeys = {}; // { username: sharedSecret }
 
@@ -27,6 +34,7 @@ app.use('/auth', authRouter); // Маршруты авторизации
 
 io.on('connection', (socket) => {
     console.log('A new client connected');
+    socket.emit('all-keys', userKeys); 
 
     const p = 23; // Простое число
     const g = 5;  // Основа
@@ -87,6 +95,7 @@ io.on('connection', (socket) => {
                 userKeys[username] = socket.sharedSecret;
                 socket.emit('auth-success', { message: 'Authentication successful', token });
                 io.emit('update-keys', { username, sharedSecret: socket.sharedSecret });
+                
                 // Дополнительные действия, например, обновление ключей
                 socket.broadcast.emit('message', {
                     username: 'System',
@@ -101,16 +110,15 @@ io.on('connection', (socket) => {
 
     // Обработка входящих сообщений
     socket.on('message', (encryptedMessage) => {
-        if (!socket.username || !socket.sharedSecret) {
-            console.error(`${socket.username} user attempted to send a message`);
-            return;
-        }
-
-        io.emit('message', {
+        console.log('Received message from:', socket.username);
+    
+        // Отправляем всем кроме отправителя
+        socket.broadcast.emit('message', {
             username: socket.username,
             message: encryptedMessage,
         });
     });
+    
 
     socket.on('disconnect', () => {
         if (socket.username) {
@@ -156,6 +164,6 @@ app.post('/auth/login', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3030;
-server.listen(PORT, () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+httpsServer.listen(PORT, () => {
+    console.log(`Secure server running on https://localhost:${PORT}`);
 });
