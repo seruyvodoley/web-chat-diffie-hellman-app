@@ -8,8 +8,7 @@ dotenv.config();
 
 const router = express.Router();
 
-// Временная "база данных" пользователей
-let users = [];
+
 
 // Регистрация нового пользователя
 router.post('/register', async (req, res) => {
