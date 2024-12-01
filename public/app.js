@@ -1,6 +1,7 @@
 let socket;
 const userKeys = {}; // { username: sharedSecret }
-
+let lastMessage = null;
+let receivedMessageIds = new Set();
 function modPow(base, exponent, mod) {
     let result = 1;
     base = base % mod;
@@ -13,122 +14,131 @@ function modPow(base, exponent, mod) {
     }
     return result;
 }
+function setupSocketListeners() {
+    if (socket.listeners('message').length > 0) {
+        console.log('Listeners already set up');
+        return;
+    }
+
+    socket.on('message', (data) => {
+        console.log('Socket ID:', socket.id);
+
+        const { messageId, username, message } = data;
+        console.log('Message from server:', data);
+    
+        if (receivedMessageIds.has(messageId)) {
+            console.log('Duplicate message received, ignoring');
+            return;
+        }
+    
+        receivedMessageIds.add(messageId);
+    
+
+        if (username === 'System') {
+            const formattedMessage = `[System] ${message}`;
+            console.log(`System message: ${formattedMessage}`);
+
+            const messageContainer = document.getElementById('messages');
+            const messageElement = document.createElement('div');
+            messageElement.textContent = formattedMessage;
+            messageContainer.appendChild(messageElement);
+        } else {
+            const senderKey = userKeys[username];
+            console.log('Current userKeys:', userKeys);
+
+            if (!senderKey) {
+                console.error(`No shared secret found for user: ${username}`);
+                return;
+            }
+
+            const decryptedMessage = String.fromCharCode(
+                ...message.map((char) => char ^ senderKey)
+            );
+
+            const formattedMessage = `${username} says: ${decryptedMessage}`;
+            console.log(`Decrypted message: ${decryptedMessage}`);
+
+            const messageContainer = document.getElementById('messages');
+            const messageElement = document.createElement('div');
+            messageElement.textContent = formattedMessage;
+            messageContainer.appendChild(messageElement);
+        }
+    });
+
+    console.log('Socket listeners set up');
+}
+
+
+
 
 function connectToChat() {
-    io.on('connection', (socket) => {
-        console.log('A new client connected');
-        socket.emit('all-keys', userKeys); 
-    
-        const p = 23; // Простое число
-        const g = 5;  // Основа
-        const privateKey = Math.floor(Math.random() * 20) + 1;
-        const publicKey = Math.pow(g, privateKey) % p;
-    
-        // Отправляем параметры DH клиенту
-        socket.emit('dh-params', { p, g, serverPublicKey: publicKey });
-    
-        let isAuthenticated = false;
-    
-        socket.on('dh-key-exchange', (clientPublicKey) => {
-            if (socket.sharedSecret) {
-                return;
-            }
-            const sharedSecret = Math.pow(clientPublicKey, privateKey) % p;
+    console.log('now working connect to chat');
+    socket = io('https://localhost:3030', { secure: true });
+
+    socket.on('connect', () => {
+        console.log('Connected to server');
+
+        socket.on('dh-params', ({ p, g, serverPublicKey }) => {
+            console.log('now working DH');
+            const privateKey = Math.floor(Math.random() * 20) + 1;
+            const publicKey = Math.pow(g, privateKey) % p;
+            const sharedSecret = Math.pow(serverPublicKey, privateKey) % p;
             socket.sharedSecret = sharedSecret;
-            socket.emit('dh-complete');
-        });
-    
-        socket.on('authenticate', (encryptedData) => {
-            if (isAuthenticated) {
-                return;
-            }
-            try {
-                console.log('Encrypted data:', encryptedData);
-                const decryptedData = decryptMessage(encryptedData, socket.sharedSecret);
-                console.log('Decrypted data:', decryptedData); // Логируем расшифрованные данные
-        
-                const { username, password } = JSON.parse(decryptedData);
-                console.log('Decrypted username:', username);
-                console.log('Decrypted password:', password);
-        
-                pool.query('SELECT * FROM users WHERE username = $1', [username], async (err, result) => {
-                    if (err) {
-                        console.error('Database error:', err);
-                        socket.emit('auth-failure', { message: 'Authentication failed' });
-                        return;
-                    }
-        
-                    const user = result.rows[0];
-                    if (!user) {
-                        console.log('User not found');
-                        socket.emit('auth-failure', { message: 'Invalid username or password' });
-                        return;
-                    }
-        
-                    const passwordMatch = await bcrypt.compare(password, user.password_hash);
-                    console.log('Password match:', passwordMatch);
-                    if (!passwordMatch) {
-                        socket.emit('auth-failure', { message: 'Invalid username or password' });
-                        return;
-                    }
-        
-                    isAuthenticated = true;
-                    const token = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
-                    socket.username = username;
-                    userKeys[username] = socket.sharedSecret;
-                    socket.emit('auth-success', { message: 'Authentication successful', token });
-                    io.emit('update-keys', { username, sharedSecret: socket.sharedSecret });
-                    
-                    // Дополнительные действия, например, обновление ключей
-                    socket.broadcast.emit('message', {
-                        username: 'System',
-                        message: `${socket.username} has joined the chat!`
-                    });
-                });
-            } catch (err) {
-                console.error('Decryption error:', err);
-                socket.emit('auth-failure', { message: 'Decryption failed' });
-            }
-        });
-    
-        // Обработка входящих сообщений
-        socket.on('message', (encryptedMessage) => {
-            console.log('Received message from:', socket.username);
-        
-            // Отправляем всем кроме отправителя
-            socket.broadcast.emit('message', {
-                username: socket.username,
-                message: encryptedMessage,
-            });
+            socket.emit('dh-key-exchange', publicKey);
         });
 
-        // Получение всех ключей при подключении
-        socket.on('all-keys', (keys) => {
-            Object.assign(userKeys, keys); // Добавляем все существующие ключи
-            console.log('All keys received:', userKeys);
-        });
+        socket.on('dh-complete', () => {
+            const username = document.getElementById('username')?.value || '';
+            const password = document.getElementById('password')?.value || '';
 
-        socket.on('update-keys', ({ username, sharedSecret }) => {
-            userKeys[username] = sharedSecret;
-        });
+            const token = getCookie('token');
 
-        socket.on('remove-key', (username) => {
-            delete userKeys[username];
-            console.log(`Key removed for user ${username}`);
-        });
-        socket.on('disconnect', () => {
-            if (socket.username) {
-                console.log(`${socket.username} disconnected`);
-                delete userKeys[socket.username];
-                socket.broadcast.emit('message', {
-                    username: 'System',
-                    message: `${socket.username} has left the chat.`
-                });
+            console.log('Username:', username);
+            console.log('Password:', password);
+
+            if (token) {
+                socket.emit('authenticate', encryptMessage({ username, password }));
+            } else {
+                console.error('Token not found. Cannot authenticate.');
             }
+            console.log('now finished dh');
         });
+
+        socket.on('auth-success', (data) => {
+            console.log('Authentication successful:', data);
+            document.getElementById('login-form').style.display = 'none';
+            document.getElementById('chat').style.display = 'block';
+        });
+
     });
+
+    // Получение всех ключей при подключении
+    socket.on('all-keys', (keys) => {
+        Object.assign(userKeys, keys); // Добавляем все существующие ключи
+        console.log('All keys received:', userKeys);
+    });
+
+    socket.on('update-keys', ({ username, sharedSecret }) => {
+        userKeys[username] = sharedSecret;
+    });
+
+    socket.on('remove-key', (username) => {
+        delete userKeys[username];
+        console.log(`Key removed for user ${username}`);
+    });
+    socket.on('disconnect', () => {
+        if (socket.username) {
+            console.log(`${socket.username} disconnected`);
+            delete userKeys[socket.username];
+            socket.broadcast.emit('message', {
+                username: 'System',
+                message: `${socket.username} has left the chat.`
+            });
+        }
+    });
+
+    setupSocketListeners();
 }
-    
 
 function encryptMessage(data) {
     const message = JSON.stringify(data);
@@ -149,7 +159,8 @@ function login(event) {
         .then(response => response.json())
         .then(data => {
             if (data.token) {
-                document.cookie = `token=${data.token};path=/;secure;samesite=strict`;
+                document.cookie = `token=${data.token};path=/;secure;samesite=strict;HttpOnly`;
+
                 console.log('Token saved in cookie:', data.token);
                 alert('Login successful!');
                 connectToChat();
@@ -199,6 +210,7 @@ function sendMessage() {
     const message = document.getElementById('message-input').value;
     if (!message.trim()) return;
 
+    console.log(`Sending message: ${message}`);
     const encryptedMessage = Array.from(message).map(
         (char) => char.charCodeAt(0) ^ socket.sharedSecret
     );
@@ -207,6 +219,7 @@ function sendMessage() {
     document.getElementById('message-input').value = '';
 }
 
+
 function checkEnter(event) {
     if (event.key === 'Enter') {
         sendMessage();
@@ -214,7 +227,7 @@ function checkEnter(event) {
 }
 
 function logout() {
-    document.cookie = "token=;path=/;expires=Thu, 01 Jan 1970 00:00:00 UTC;secure;samesite=strict";
+    //document.cookie = "token=;path=/;expires=Thu, 01 Jan 1970 00:00:00 UTC;secure;samesite=strict";
     socket?.disconnect();
     socket = null;
     document.getElementById('chat').style.display = 'none';

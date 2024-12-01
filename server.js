@@ -33,7 +33,13 @@ app.use('/auth', authRouter); // Маршруты авторизации
 
 
 io.on('connection', (socket) => {
-    console.log('A new client connected');
+    console.log(`New client connected: ${socket.id}`);
+    if (userKeys[socket.username]) {
+        console.log(`Duplicate connection detected for user: ${socket.username}`);
+        socket.disconnect();
+        return;
+    }
+
     socket.emit('all-keys', userKeys); 
 
     const p = 23; // Простое число
@@ -90,16 +96,17 @@ io.on('connection', (socket) => {
                 }
     
                 isAuthenticated = true;
-                const token = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
+                //const token = jwt.sign({ username: user.username }, process.env.JWT_SECRET, { expiresIn: '1h' });
                 socket.username = username;
                 userKeys[username] = socket.sharedSecret;
-                socket.emit('auth-success', { message: 'Authentication successful', token });
+                socket.emit('auth-success', { message: 'Authentication successful' });
                 io.emit('update-keys', { username, sharedSecret: socket.sharedSecret });
-                
+                const messageId = Math.random().toString(36).substring(2);
                 // Дополнительные действия, например, обновление ключей
-                socket.broadcast.emit('message', {
+                io.emit('message', {
                     username: 'System',
-                    message: `${socket.username} has joined the chat!`
+                    message: `${socket.username} has joined the chat!`,
+                    messageId  // Добавляем уникальный ID
                 });
             });
         } catch (err) {
@@ -110,16 +117,19 @@ io.on('connection', (socket) => {
 
     // Обработка входящих сообщений
     socket.on('message', (encryptedMessage) => {
+        const messageId = Math.random().toString(36).substring(2);
+        console.log(`Message received from ${socket.id}:`, encryptedMessage);
         console.log('Received message from:', socket.username);
     
         // Отправляем всем кроме отправителя
         socket.broadcast.emit('message', {
             username: socket.username,
             message: encryptedMessage,
+            messageId,  // Добавляем уникальный ID
         });
     });
     
-
+ 
     socket.on('disconnect', () => {
         if (socket.username) {
             console.log(`${socket.username} disconnected`);
@@ -137,16 +147,8 @@ function decryptMessage(encryptedMessage, sharedSecret) {
     return String.fromCharCode(...encryptedMessage.map(char => char ^ sharedSecret));
 }
 
-// Обработчик для извлечения токена из куки
-function getTokenFromCookies(req) {
-    const token = req.cookies.token;
-    if (!token) {
-        return null;  // Нет токена
-    }
-    return token;  // Возвращаем токен
-}
 
-// Обработка запроса на аутентификацию (например, на вход)
+
 app.post('/auth/login', (req, res) => {
     const { encryptedData } = req.body;
     const token = getTokenFromCookies(req);  // Извлекаем токен из куки
@@ -162,6 +164,16 @@ app.post('/auth/login', (req, res) => {
         return res.status(401).json({ message: 'No token found' });
     }
 });
+
+
+function getTokenFromCookies(req) {
+    const token = req.cookies.token;
+    if (!token) {
+        console.error('Token not found in cookies');
+        return null;
+    }
+    return token;
+}
 
 const PORT = process.env.PORT || 3030;
 httpsServer.listen(PORT, () => {
