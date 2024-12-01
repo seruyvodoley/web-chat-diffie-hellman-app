@@ -7,7 +7,7 @@ const pool = require('./db');
 const cookieParser = require('cookie-parser'); // Подключаем cookie-parser
 const fs = require('fs');
 const https = require('https');
-
+const crypto = require('crypto'); // Для безопасной генерации больших чиселс
 // Загрузка SSL-сертификатов
 const sslOptions = {
     key: fs.readFileSync('server.key'),
@@ -42,13 +42,29 @@ io.on('connection', (socket) => {
 
     socket.emit('all-keys', userKeys); 
 
-    const p = 23; // Простое число
-    const g = 5;  // Основа
-    const privateKey = Math.floor(Math.random() * 20) + 1;
-    const publicKey = Math.pow(g, privateKey) % p;
+    const generateBigPrime = (length) => {
+        while (true) {
+            const primeCandidate = crypto.randomInt(10 ** (length - 1), 10 ** length);
+            if (isPrime(primeCandidate)) return primeCandidate;
+        }
+    };
 
+    const isPrime = (num) => {
+        if (num <= 1) return false;
+        if (num <= 3) return true;
+        if (num % 2 === 0 || num % 3 === 0) return false;
+        for (let i = 5; i * i <= num; i += 6) {
+            if (num % i === 0 || num % (i + 2) === 0) return false;
+        }
+        return true;
+    };
+
+    const p = generateBigPrime(10); // Простое 50-значное число
+    const g = crypto.randomInt(2, p - 1); // Генератор меньше `p`
+    const privateKey = crypto.randomInt(10 ** 5, 10 ** 6); // Приватный ключ
+    const publicKey = BigInt(g) ** BigInt(privateKey) % BigInt(p); // Открытый ключ
     // Отправляем параметры DH клиенту
-    socket.emit('dh-params', { p, g, serverPublicKey: publicKey });
+    socket.emit('dh-params', { p, g, serverPublicKey: publicKey.toString() });
 
     let isAuthenticated = false;
 
@@ -56,8 +72,8 @@ io.on('connection', (socket) => {
         if (socket.sharedSecret) {
             return;
         }
-        const sharedSecret = Math.pow(clientPublicKey, privateKey) % p;
-        socket.sharedSecret = sharedSecret;
+        const sharedSecret = BigInt(clientPublicKey) ** BigInt(privateKey) % BigInt(p);
+        socket.sharedSecret = sharedSecret.toString(); // Общий секрет в строке
         socket.emit('dh-complete');
     });
 

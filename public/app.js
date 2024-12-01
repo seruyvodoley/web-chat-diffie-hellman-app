@@ -1,19 +1,9 @@
+
 let socket;
 const userKeys = {}; // { username: sharedSecret }
 let lastMessage = null;
 let receivedMessageIds = new Set();
-function modPow(base, exponent, mod) {
-    let result = 1;
-    base = base % mod;
-    while (exponent > 0) {
-        if (exponent % 2 === 1) {
-            result = (result * base) % mod;
-        }
-        base = (base * base) % mod;
-        exponent = Math.floor(exponent / 2);
-    }
-    return result;
-}
+
 function setupSocketListeners() {
     if (socket.listeners('message').length > 0) {
         console.log('Listeners already set up');
@@ -33,6 +23,7 @@ function setupSocketListeners() {
     
         receivedMessageIds.add(messageId);
     
+        lastMessage = message;
 
         if (username === 'System') {
             const formattedMessage = `[System] ${message}`;
@@ -69,8 +60,6 @@ function setupSocketListeners() {
 }
 
 
-
-
 function connectToChat() {
     console.log('now working connect to chat');
     socket = io('https://localhost:3030', { secure: true });
@@ -79,12 +68,18 @@ function connectToChat() {
         console.log('Connected to server');
 
         socket.on('dh-params', ({ p, g, serverPublicKey }) => {
-            console.log('now working DH');
-            const privateKey = Math.floor(Math.random() * 20) + 1;
-            const publicKey = Math.pow(g, privateKey) % p;
-            const sharedSecret = Math.pow(serverPublicKey, privateKey) % p;
-            socket.sharedSecret = sharedSecret;
-            socket.emit('dh-key-exchange', publicKey);
+            console.log(`DH parameters received from server P: ${p}, g: ${g}, serverPublicKey: ${serverPublicKey}`);
+            function generateRandomInt(min, max) {
+                const range = max - min;
+                const randomValue = crypto.getRandomValues(new Uint32Array(1))[0];  // Используем Web Crypto API
+                return min + (randomValue % range);
+            }
+            const privateKey = generateRandomInt(10 ** 5, 10 ** 6);
+            const publicKey = BigInt(g) ** BigInt(privateKey) % BigInt(p); // Открытый ключ
+            const sharedSecret = BigInt(serverPublicKey) ** BigInt(privateKey) % BigInt(p); // Общий секрет
+
+            socket.sharedSecret = sharedSecret.toString(); // Сохраняем общий секрет
+            socket.emit('dh-key-exchange', publicKey.toString());
         });
 
         socket.on('dh-complete', () => {
